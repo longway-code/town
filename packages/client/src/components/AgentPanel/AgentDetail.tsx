@@ -1,11 +1,19 @@
+import { useEffect } from 'react';
 import { useAgentStore } from '../../store/agentStore.js';
 import { useSimulationStore } from '../../store/simulationStore.js';
 import { MemoryLog } from './MemoryLog.js';
 
 export function AgentDetail() {
-  const { agents, selectedAgentId, agentMemories } = useAgentStore();
+  const { agents, selectedAgentId, agentMemories, loadMemories } = useAgentStore();
   const simTime = useSimulationStore(s => s.simulation?.simTime ?? 0);
   const agent = agents.find(a => a.identity.id === selectedAgentId);
+
+  // Auto-refresh memories every 8s while an agent is selected
+  useEffect(() => {
+    if (!selectedAgentId) return;
+    const timer = setInterval(() => loadMemories(selectedAgentId), 8000);
+    return () => clearInterval(timer);
+  }, [selectedAgentId, loadMemories]);
 
   if (!agent) {
     return (

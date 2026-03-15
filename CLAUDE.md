@@ -39,9 +39,10 @@ packages/client/src/
 
 1. `SimulationEngine.doTick()` — advances clock, calls `agentManager.tick()`
 2. `AgentManager.tick()`:
-   a. `handleDialogues()` — advance one turn per active dialogue pair
+   a. `handleDialogues()` — advance one turn per active dialogue pair; on dialogue end, force the two agents to separate locations
    b. Non-conversing agents tick in parallel (`perceive → plan → act → maybeReflect`)
-   c. `triggerDialogues()` — co-located agents have 20% chance to start dialogue; first turn fires immediately
+   c. `nudgeStrangers()` — 8% chance per tick to find a never-met pair and send them to the same location
+   d. `triggerDialogues()` — co-located agents have 20% chance to start dialogue; first turn fires immediately
 3. `globalBus.emit('sim:tick', ...)` — WsServer broadcasts to all WebSocket clients
 
 ## LLM Providers
@@ -61,7 +62,7 @@ All providers apply `stripThinking()` to strip `<think>...</think>` blocks from 
 ## Prompts
 
 All prompts are in Chinese. Located in `packages/server/src/llm/prompts/`:
-- `planning.ts` — daily plan (24-line hourly schedule) + hourly decomposition (timed actions with locationId)
+- `planning.ts` — daily plan (24-line hourly schedule) + `buildActionDecisionPrompt` (tool-use style, LLM picks `move_to` or `stay` on demand)
 - `reflection.ts` — synthesize top-15 memories into 3 numbered insights
 - `dialogue.ts` — single utterance given speaker identity, history, relevant memories; also importance scoring prompt
 
@@ -69,11 +70,36 @@ All prompts are in Chinese. Located in `packages/server/src/llm/prompts/`:
 
 ```
 tick()
-  perceive()      → write observation memory on location change
-  plan()          → createDailyPlan() if new day; decomposeHour() if new hour
-  act()           → navigate via A* to action.locationId; update status/position
-  maybeReflect()  → if importanceAccumulator >= threshold, call Reflector
+  perceive()        → write observation memory on location change
+  plan()            → createDailyPlan() if new day (for display only)
+  act()             → if no current action: decideNextAction() via LLM tool-use prompt
+                      cold start: random non-home location (no LLM call)
+                      then navigate via A* to action.locationId
+  maybeReflect()    → if importanceAccumulator >= threshold, call Reflector
 ```
+
+## Action Decision (Tool-Use Style)
+
+`Planner.decideNextAction()` is called whenever an agent has no current action (debounced to 10 sim minutes). The prompt presents two "tools":
+
+```
+TOOL: move_to
+LOCATION: cafe
+DESCRIPTION: 去咖啡馆喝咖啡
+
+TOOL: stay
+DURATION: 20
+DESCRIPTION: 在图书馆看书
+```
+
+`parseActionDecision()` parses the response. `normalizeLocationId()` maps Chinese aliases (图书馆 → library) as a fallback in case the LLM ignores the English ID instruction.
+
+## Social Mechanics
+
+- **Dialogue cooldown**: Same pair cannot dialogue again for 120 sim minutes after finishing.
+- **Post-dialogue separation**: When a dialogue ends, both agents are assigned random different locations via `Agent.forceMoveTo()`.
+- **Stranger nudging**: `nudgeStrangers()` (8% per tick) finds a pair who have never talked and sends them to the same location to facilitate a first meeting.
+- **Cold start scatter**: On first action decision (`lastDecisionAt === 0`), agent is sent to a random non-home location without an LLM call.
 
 ## Memory Retrieval Scoring
 
@@ -82,6 +108,10 @@ Score = (recency × 1/3) + (importance × 1/3) + (cosine_relevance × 1/3)
 - Recency: exponential decay `RECENCY_DECAY^(elapsed_sim_minutes)`
 - Importance: 1–10, LLM-scored asynchronously
 - Relevance: cosine similarity between query embedding and memory embedding
+
+## Memory API
+
+`GET /api/memories/:agentId?limit=20&type=dialogue` — supports `type` filter (`observation`, `dialogue`, `reflection`). Client fetches each type separately (20 each) and merges, so dialogue doesn't crowd out observation/reflection in the UI.
 
 ## Common Commands
 
@@ -95,10 +125,11 @@ pnpm build                        # build all packages
 ## Known Constraints
 
 - Rate limits: MiniMax/OpenAI rate limits hit with many agents. Importance scoring is deliberately serialized with 5s batches.
-- `maxTokens: 512` for dialogue — reasoning models need space for `<think>` blocks.
+- `maxTokens: 512` for dialogue, `150` for action decisions — reasoning models need space for `<think>` blocks.
 - Dialogue ends after 8 turns (`MAX_TURNS`). No LLM-driven natural ending currently.
 - `tickRunning` mutex: if a tick takes longer than `tickIntervalMs`, the next tick is skipped (not queued).
 - React StrictMode double-invokes `useEffect` in dev. The `active` flag in `useSimulationSocket` prevents duplicate WebSocket connections.
+- `decideNextAction` debounce: 10 sim minutes minimum between calls per agent to avoid LLM spam.
 
 ## File Naming Conventions
 
@@ -112,3 +143,5 @@ pnpm build                        # build all packages
 - Do not call `getLLMProvider()` at module load time — call it inside the function that needs it (env may not be loaded yet at import time)
 - Do not upgrade `better-sqlite3` below v12 — Node.js v24 requires v12+
 - Do not add importance scoring for `observation` type memories — too many LLM calls
+- Do not use `decomposeHour()` — replaced by on-demand `decideNextAction()` with tool-use style prompt
+- Do not compare simTime (milliseconds) against `COOLDOWN_SIM_MINUTES * 60` — must be `* 60 * 1000`

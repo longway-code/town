@@ -6,11 +6,14 @@ import { globalBus } from '../simulation/EventBus.js';
 import { logger } from '../utils/logger.js';
 
 const MAX_TURNS = 8;
+const COOLDOWN_SIM_MINUTES = 120; // same pair can't talk again for 2 sim hours
 
 export class DialogueManager {
   private memoryStream: MemoryStream;
   // Active dialogues: key = sorted agentId pair
   private activeDialogues = new Map<string, { turns: DialogueTurn[]; nextSpeaker: string }>();
+  // Cooldown: key → simTime (unix seconds) when dialogue ended
+  private cooldowns = new Map<string, number>();
 
   constructor(memoryStream: MemoryStream) {
     this.memoryStream = memoryStream;
@@ -30,9 +33,15 @@ export class DialogueManager {
     return null;
   }
 
-  async startDialogue(agentA: AgentState, agentB: AgentState): Promise<boolean> {
+  async startDialogue(agentA: AgentState, agentB: AgentState, simTime: number): Promise<boolean> {
     const key = this.dialogueKey(agentA.identity.id, agentB.identity.id);
     if (this.activeDialogues.has(key)) return false;
+
+    // Check cooldown
+    const lastEnded = this.cooldowns.get(key);
+    if (lastEnded !== undefined && simTime - lastEnded < COOLDOWN_SIM_MINUTES * 60 * 1000) {
+      return false;
+    }
 
     this.activeDialogues.set(key, { turns: [], nextSpeaker: agentA.identity.id });
     logger.info({ agentA: agentA.identity.name, agentB: agentB.identity.name }, 'Dialogue started');
@@ -106,7 +115,12 @@ export class DialogueManager {
     if (!dialogue) return;
 
     this.activeDialogues.delete(key);
+    this.cooldowns.set(key, simTime); // record end time for cooldown
     logger.info({ key }, 'Dialogue ended');
+  }
+
+  hasEverTalked(agentAId: string, agentBId: string): boolean {
+    return this.cooldowns.has(this.dialogueKey(agentAId, agentBId));
   }
 
   getNextSpeaker(agentAId: string, agentBId: string): string | null {

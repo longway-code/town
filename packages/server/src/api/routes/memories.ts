@@ -6,7 +6,8 @@ export function createMemoriesRouter(): Router {
 
   router.get('/:agentId', (req, res) => {
     const limit = parseInt(String(req.query['limit'] ?? '50'), 10);
-    const memories = memoryRepo.findByAgentId(req.params['agentId']!, limit);
+    const type = req.query['type'] as string | undefined;
+    const memories = memoryRepo.findByAgentId(req.params['agentId']!, limit, type);
     res.json(memories);
   });
 

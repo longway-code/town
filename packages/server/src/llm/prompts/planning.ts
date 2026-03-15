@@ -20,22 +20,48 @@ ${recentMemories.slice(0, 10).map((m, i) => `${i + 1}. ${m}`).join('\n')}
 ...`;
 }
 
-export function buildHourlyDecomposePrompt(
+const LOCATION_LIST = `- home      住宅区
+- park      中央公园
+- cafe      咖啡馆
+- library   图书馆
+- town_hall 市政厅
+- market    集市`;
+
+export function buildActionDecisionPrompt(
   agent: AgentState,
-  hourDescription: string,
-  locationIds: string[]
+  currentLocationId: string,
+  hourPlan: string,
+  recentMemories: string[],
+  simTime: number
 ): string {
   const { identity } = agent;
-  return `你是${identity.name}，${identity.age}岁，职业是${identity.occupation}。
-本小时的计划：「${hourDescription}」
-可用地点：${locationIds.join('、')}
+  const d = new Date(simTime);
+  const timeStr = `${String(d.getUTCHours()).padStart(2,'0')}:${String(d.getUTCMinutes()).padStart(2,'0')}`;
+  const memCtx = recentMemories.length ? recentMemories.map(m => `- ${m}`).join('\n') : '（暂无）';
 
-请将这一小时拆分为若干5分钟步骤，以JSON数组格式返回：
-[
-  { "startMinute": 0, "duration": 15, "description": "活动描述", "locationId": "地点ID" },
-  ...
-]
-要求：所有步骤时长之和恰好等于60分钟，描述用中文，locationId必须是以下之一：${locationIds.join('、')}`;
+  return `你是${identity.name}，${identity.age}岁，${identity.occupation}。
+性格：${identity.traits.join('、')}
+当前时间：${timeStr}，当前位置：${currentLocationId}
+本时段计划：${hourPlan}
+近期记忆：
+${memCtx}
+
+请决定接下来要做什么，调用以下工具之一：
+
+工具A — 移动到某个地点：
+TOOL: move_to
+LOCATION: <地点英文ID>
+DESCRIPTION: <用中文描述你要去做什么>
+
+工具B — 在当前地点停留：
+TOOL: stay
+DURATION: <停留分钟数，10到60之间>
+DESCRIPTION: <用中文描述你在做什么>
+
+可用地点（LOCATION填写左边的英文ID）：
+${LOCATION_LIST}
+
+只输出工具调用内容，不要有其他解释。`;
 }
 
 export function parseDailyPlan(raw: string): string[] {
@@ -60,12 +86,77 @@ export interface DecomposedAction {
   locationId: string;
 }
 
+const VALID_LOCATION_IDS = ['home', 'park', 'cafe', 'library', 'town_hall', 'market'];
+
+const LOCATION_ALIAS: Record<string, string> = {
+  '住宅区': 'home', '家': 'home',
+  '中央公园': 'park', '公园': 'park',
+  '咖啡馆': 'cafe', '咖啡': 'cafe',
+  '图书馆': 'library',
+  '市政厅': 'town_hall', '市政': 'town_hall',
+  '集市': 'market', '市场': 'market',
+};
+
+function normalizeLocationId(raw: string, fallback: string): string {
+  const trimmed = raw.trim();
+  if (VALID_LOCATION_IDS.includes(trimmed)) return trimmed;
+  return LOCATION_ALIAS[trimmed] ?? fallback;
+}
+
+export interface ActionDecision {
+  tool: 'move_to' | 'stay';
+  locationId: string;
+  duration: number; // sim minutes
+  description: string;
+}
+
+export function parseActionDecision(raw: string, currentLocationId: string): ActionDecision {
+  const lines = raw.trim().split('\n').map(l => l.trim()).filter(Boolean);
+  let tool: 'move_to' | 'stay' = 'stay';
+  let locationId = currentLocationId;
+  let duration = 20;
+  let description = '进行日常活动';
+
+  for (const line of lines) {
+    if (/^TOOL[：:]\s*move_to/i.test(line)) {
+      tool = 'move_to';
+    } else if (/^TOOL[：:]\s*stay/i.test(line)) {
+      tool = 'stay';
+    } else if (/^LOCATION[：:]/i.test(line)) {
+      const raw = line.replace(/^LOCATION[：:]\s*/i, '');
+      locationId = normalizeLocationId(raw, currentLocationId);
+    } else if (/^DURATION[：:]/i.test(line)) {
+      const d = parseInt(line.replace(/^DURATION[：:]\s*/i, ''));
+      if (!isNaN(d) && d >= 5 && d <= 120) duration = d;
+    } else if (/^DESCRIPTION[：:]/i.test(line)) {
+      description = line.replace(/^DESCRIPTION[：:]\s*/i, '');
+    }
+  }
+
+  return {
+    tool,
+    locationId: tool === 'move_to' ? locationId : currentLocationId,
+    duration: tool === 'move_to' ? 60 : duration, // move_to: 60 min at destination
+    description,
+  };
+}
+
+// Keep for backward compat (unused now but referenced in Planner)
+export interface DecomposedAction {
+  startMinute: number;
+  duration: number;
+  description: string;
+  locationId: string;
+}
+
 export function parseDecomposedActions(raw: string, fallbackLocationId: string): DecomposedAction[] {
   try {
     const jsonMatch = raw.match(/\[[\s\S]*\]/);
     if (!jsonMatch) throw new Error('No JSON array found');
     const parsed = JSON.parse(jsonMatch[0]) as DecomposedAction[];
-    return parsed.filter(a => typeof a.startMinute === 'number' && typeof a.duration === 'number');
+    return parsed
+      .filter(a => typeof a.startMinute === 'number' && typeof a.duration === 'number')
+      .map(a => ({ ...a, locationId: normalizeLocationId(a.locationId, fallbackLocationId) }));
   } catch {
     return [{ startMinute: 0, duration: 60, description: '进行日常活动', locationId: fallbackLocationId }];
   }

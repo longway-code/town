@@ -35,8 +35,14 @@ export const useAgentStore = create<AgentStore>((set) => ({
   },
 
   loadMemories: async (agentId: string) => {
-    const res = await fetch(`/api/memories/${agentId}?limit=30`);
-    const memories = await res.json() as MemoryEntry[];
-    set({ agentMemories: memories });
+    // Fetch each type separately so dialogue doesn't crowd out observation/reflection
+    const [all, obs, ref] = await Promise.all([
+      fetch(`/api/memories/${agentId}?limit=20&type=dialogue`).then(r => r.json()),
+      fetch(`/api/memories/${agentId}?limit=20&type=observation`).then(r => r.json()),
+      fetch(`/api/memories/${agentId}?limit=20&type=reflection`).then(r => r.json()),
+    ]) as [MemoryEntry[], MemoryEntry[], MemoryEntry[]];
+    // Merge and sort by time desc
+    const merged = [...all, ...obs, ...ref].sort((a, b) => b.createdAt - a.createdAt);
+    set({ agentMemories: merged });
   },
 }));

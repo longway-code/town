@@ -77,6 +77,9 @@ export class AgentManager {
         .map(a => a.tick(simTime, config))
     );
 
+    // Nudge strangers toward each other
+    this.nudgeStrangers(agentList, simTime);
+
     // Find agents at same location for dialogue triggers
     await this.triggerDialogues(agentList, simTime, config);
 
@@ -102,11 +105,16 @@ export class AgentManager {
 
       const result = await this.dialogue.advanceTurn(speaker.state, listener.state, simTime);
       if (result === null) {
-        // Dialogue ended (max turns reached)
+        // Dialogue ended — force them to separate locations
         agentA.state.status = 'idle';
         agentB.state.status = 'idle';
         agentA.state.conversationPartner = undefined;
         agentB.state.conversationPartner = undefined;
+
+        const allLocs = ['home', 'park', 'cafe', 'library', 'town_hall', 'market'];
+        const shuffled = [...allLocs].sort(() => Math.random() - 0.5);
+        agentA.forceMoveTo(shuffled[0]!, simTime, '对话结束，前往其他地方');
+        agentB.forceMoveTo(shuffled[1]!, simTime, '对话结束，前往其他地方');
       }
     }
   }
@@ -138,7 +146,7 @@ export class AgentManager {
         if (this.dialogue.isInDialogue(agentA.state.identity.id)) continue;
         if (this.dialogue.isInDialogue(agentB.state.identity.id)) continue;
 
-        const started = await this.dialogue.startDialogue(agentA.state, agentB.state);
+        const started = await this.dialogue.startDialogue(agentA.state, agentB.state, simTime);
         if (started) {
           agentA.state.status = 'conversing';
           agentA.state.conversationPartner = agentB.state.identity.id;
@@ -147,6 +155,35 @@ export class AgentManager {
 
           // First turn immediately
           await this.dialogue.advanceTurn(agentA.state, agentB.state, simTime);
+        }
+      }
+    }
+  }
+
+  private nudgeStrangers(agents: Agent[], simTime: number): void {
+    // 8% chance per tick to nudge one stranger pair toward the same location
+    if (Math.random() > 0.08) return;
+
+    const available = agents.filter(
+      a => a.state.status !== 'conversing' && a.state.status !== 'sleeping'
+    );
+    if (available.length < 2) return;
+
+    // Find a pair who have never talked
+    for (let i = 0; i < available.length; i++) {
+      for (let j = i + 1; j < available.length; j++) {
+        const a = available[i]!;
+        const b = available[j]!;
+        if (!this.dialogue.hasEverTalked(a.state.identity.id, b.state.identity.id)) {
+          const locs = ['park', 'cafe', 'library', 'town_hall', 'market'];
+          const meetLoc = locs[Math.floor(Math.random() * locs.length)]!;
+          a.forceMoveTo(meetLoc, simTime, `去${meetLoc}转转`);
+          b.forceMoveTo(meetLoc, simTime, `去${meetLoc}转转`);
+          logger.info(
+            { agentA: a.state.identity.name, agentB: b.state.identity.name, loc: meetLoc },
+            'Nudging strangers to meet'
+          );
+          return; // one pair per tick
         }
       }
     }

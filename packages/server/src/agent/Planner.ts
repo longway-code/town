@@ -1,10 +1,11 @@
 import type { AgentState, DailyPlan, PlannedAction } from '@town/shared';
 import { getLLMProvider } from '../llm/provider.js';
 import {
-  buildDailyPlanPrompt, buildHourlyDecomposePrompt,
-  parseDailyPlan, parseDecomposedActions
+  buildDailyPlanPrompt, buildActionDecisionPrompt,
+  parseDailyPlan, parseActionDecision,
 } from '../llm/prompts/planning.js';
 import { MemoryStream } from '../memory/MemoryStream.js';
+import { WorldMap } from '../map/WorldMap.js';
 import { getLocationById, LOCATION_IDS } from '../map/locations.js';
 import { logger } from '../utils/logger.js';
 
@@ -40,6 +41,41 @@ export class Planner {
       currentActions: [],
       lastDecomposedHour: -1,
     };
+  }
+
+  async decideNextAction(agent: AgentState, simTime: number): Promise<PlannedAction> {
+    const simHour = new Date(simTime).getUTCHours();
+    const hourPlan = agent.currentPlan?.hourlyPlan[simHour] ?? '进行日常活动';
+    const recentMems = this.memoryStream.getRecent(agent.identity.id, 5).map(m => m.content);
+
+    const map = WorldMap.getInstance();
+    const tile = map.getTile(agent.position.x, agent.position.y);
+    const currentLocationId = tile?.locationId ?? agent.identity.homeLocationId;
+
+    const prompt = buildActionDecisionPrompt(agent, currentLocationId, hourPlan, recentMems, simTime);
+
+    try {
+      const provider = getLLMProvider();
+      const response = await provider.complete({
+        messages: [{ role: 'user', content: prompt }],
+        maxTokens: 150,
+        temperature: 0.8,
+      });
+      const decision = parseActionDecision(response.content, currentLocationId);
+      logger.info(
+        { agentId: agent.identity.id, tool: decision.tool, locationId: decision.locationId },
+        'Action decided'
+      );
+      return {
+        startTime: simTime,
+        duration: decision.duration,
+        description: decision.description,
+        locationId: decision.locationId,
+      };
+    } catch (err) {
+      logger.warn({ err, agentId: agent.identity.id }, 'decideNextAction failed, staying put');
+      return { startTime: simTime, duration: 15, description: hourPlan, locationId: currentLocationId };
+    }
   }
 
   async decomposeHour(

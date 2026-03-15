@@ -1,4 +1,4 @@
-import type { AgentState, AgentAction, SimulationConfig } from '@town/shared';
+import type { AgentState, AgentAction, SimulationConfig, PlannedAction } from '@town/shared';
 import { WorldMap } from '../map/WorldMap.js';
 import { PathFinder } from '../map/PathFinder.js';
 import { getLocationById, getRandomSpawnPoint } from '../map/locations.js';
@@ -17,6 +17,7 @@ export class Agent {
   private currentPath: { x: number; y: number }[] = [];
   private pathIndex = 0;
   private lastObservedLocationId: string | null = null;
+  private lastDecisionAt = 0; // simTime of last decideNextAction call
 
   constructor(
     state: AgentState,
@@ -62,11 +63,9 @@ export class Agent {
   }
 
   private async plan(simTime: number): Promise<void> {
-    const clock = new Date(simTime);
-    const simDate = clock.toISOString().split('T')[0]!;
-    const simHour = clock.getUTCHours();
+    const simDate = new Date(simTime).toISOString().split('T')[0]!;
 
-    // Create daily plan if needed
+    // Create daily plan if new day
     if (!this.state.currentPlan || this.state.currentPlan.date !== simDate) {
       try {
         this.state.currentPlan = await this.planner.createDailyPlan(
@@ -75,20 +74,6 @@ export class Agent {
         logger.info({ agentId: this.state.identity.id }, 'Daily plan created');
       } catch (err) {
         logger.warn({ err, agentId: this.state.identity.id }, 'Daily plan failed');
-        return;
-      }
-    }
-
-    // Decompose current hour if needed
-    if (this.state.currentPlan.lastDecomposedHour !== simHour) {
-      try {
-        const actions = await this.planner.decomposeHour(
-          this.state, this.state.currentPlan, simHour, simTime
-        );
-        this.state.currentPlan.currentActions = actions;
-        this.state.currentPlan.lastDecomposedHour = simHour;
-      } catch (err) {
-        logger.warn({ err }, 'Hour decompose failed');
       }
     }
   }
@@ -99,10 +84,28 @@ export class Agent {
       return;
     }
 
-    const action = this.planner.getCurrentAction(this.state.currentPlan, simTime);
+    let action = this.planner.getCurrentAction(this.state.currentPlan, simTime);
+
+    // No current action — decide what to do next
     if (!action) {
-      this.state.status = 'idle';
-      return;
+      // Cold start: no previous decision, send agent to a random non-home location immediately
+      if (this.lastDecisionAt === 0) {
+        this.lastDecisionAt = simTime;
+        const locations = ['park', 'cafe', 'library', 'town_hall', 'market'];
+        const randomLoc = locations[Math.floor(Math.random() * locations.length)]!;
+        action = { startTime: simTime, duration: 60, description: '出门活动', locationId: randomLoc };
+        this.state.currentPlan.currentActions = [action];
+      } else {
+        // Debounce: wait at least 10 sim minutes between LLM decisions
+        const TEN_SIM_MINUTES = 10 * 60 * 1000;
+        if (simTime - this.lastDecisionAt < TEN_SIM_MINUTES) {
+          this.state.status = 'idle';
+          return;
+        }
+        this.lastDecisionAt = simTime;
+        action = await this.planner.decideNextAction(this.state, simTime);
+        this.state.currentPlan.currentActions = [action];
+      }
     }
 
     // Check if we need to navigate to the action's location
@@ -154,5 +157,14 @@ export class Agent {
 
   addImportance(amount: number): void {
     this.state.importanceAccumulator += amount;
+  }
+
+  forceMoveTo(locationId: string, simTime: number, description = '前往其他地点'): void {
+    if (!this.state.currentPlan) return;
+    const action: PlannedAction = { startTime: simTime, duration: 60, description, locationId };
+    this.state.currentPlan.currentActions = [action];
+    this.lastDecisionAt = simTime;
+    this.currentPath = [];
+    this.pathIndex = 0;
   }
 }

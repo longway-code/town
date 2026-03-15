@@ -45,11 +45,11 @@ export const memoryRepo = {
     );
   },
 
-  findByAgentId(agentId: string, limit = 200): MemoryEntry[] {
+  findByAgentId(agentId: string, limit = 200, type?: string): MemoryEntry[] {
     const db = getDb();
-    const rows = db.prepare(
-      'SELECT * FROM memories WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?'
-    ).all(agentId, limit) as MemoryRow[];
+    const rows = type
+      ? db.prepare('SELECT * FROM memories WHERE agent_id = ? AND type = ? ORDER BY created_at DESC LIMIT ?').all(agentId, type, limit) as MemoryRow[]
+      : db.prepare('SELECT * FROM memories WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?').all(agentId, limit) as MemoryRow[];
     return rows.map(rowToEntry);
   },
 
